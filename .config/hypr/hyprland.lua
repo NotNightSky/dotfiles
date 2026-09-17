@@ -55,6 +55,7 @@ local menu = "wofi --show drun"
 --   hl.exec_cmd("waybar & hyprpaper & firefox")
 -- end)
 
+hl.exec_cmd("hypridle")
 hl.exec_cmd("snappy-switcher --daemon")
 hl.exec_cmd('gsettings set org.gnome.desktop.interface color-scheme "prefer-dark"')
 hl.exec_cmd('gsettings set org.gnome.desktop.interface gtk-theme "Adwaita-dark"')
