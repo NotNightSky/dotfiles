@@ -54,15 +54,14 @@ local menu = "wofi --show drun"
 --   hl.exec_cmd("nm-applet")
 --   hl.exec_cmd("waybar & hyprpaper & firefox")
 -- end)
-
-hl.exec_cmd("hypridle")
-hl.exec_cmd("snappy-switcher --daemon")
-hl.exec_cmd('gsettings set org.gnome.desktop.interface color-scheme "prefer-dark"')
-hl.exec_cmd('gsettings set org.gnome.desktop.interface gtk-theme "Adwaita-dark"')
-hl.exec_cmd("kdeconnectd")
-hl.exec_cmd("mount /dev/sda4 /data")
-hl.exec_cmd("dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP")
-
+hl.on("hyprland.start", function ()
+	hl.exec_cmd("hypridle")
+	hl.exec_cmd("snappy-switcher --daemon")
+	hl.exec_cmd('gsettings set org.gnome.desktop.interface color-scheme "prefer-dark"')
+	hl.exec_cmd('gsettings set org.gnome.desktop.interface gtk-theme "Adwaita-dark"')
+	hl.exec_cmd("kdeconnectd")
+	hl.exec_cmd("dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP")
+end)
 -------------------------------
 ---- ENVIRONMENT VARIABLES ----
 -------------------------------
@@ -126,7 +125,7 @@ hl.config({
 
         -- Change transparency of focused and unfocused windows
         active_opacity   = 1.0,
-        inactive_opacity = 0.8,
+        inactive_opacity = 0.6,
 
         shadow = {
             enabled      = true,
@@ -193,6 +192,18 @@ hl.animation({ leaf = "zoomFactor",    enabled = true,  speed = 7,    bezier = "
 --     border_size = 0,
 --     rounding    = 0,
 -- })
+
+hl.layer_rule({
+	match = { namespace = "wofi" },
+	blur = true,
+	ignore_alpha = 0.2,
+})
+
+hl.layer_rule({
+	match = { namespace = "snappy-switcher" },
+	blur = true,
+	ignore_alpha = 0.2,
+})
 
 -- See https://wiki.hypr.land/Configuring/Layouts/Dwindle-Layout/ for more
 hl.config({
@@ -272,7 +283,7 @@ local mainMod = "SUPER" -- Sets "Windows" key as main modifier
 -- Window switcher
 hl.bind("ALT + Tab", hl.dsp.exec_cmd("snappy-switcher next --mod alt"))
 -- Screenshot
-hl.bind("Print", hl.dsp.exec_cmd('grim - | satty -f - --copy-command wl-copy -o "~/Pictures/Screenshots/%Y%m%d_%H%M%S.png"'))
+hl.bind("Print", hl.dsp.exec_cmd('sleep 3 && grim - | satty -f - --copy-command wl-copy -o "~/Pictures/Screenshots/%Y%m%d_%H%M%S.png"'))
 -- Example binds, see https://wiki.hypr.land/Configuring/Basics/Binds/ for more
 hl.bind(mainMod .. " + Q", hl.dsp.exec_cmd(terminal))
 local closeWindowBind = hl.bind(mainMod .. " + C", hl.dsp.window.close())
