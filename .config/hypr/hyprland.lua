@@ -60,6 +60,8 @@ hl.on("hyprland.start", function ()
 	hl.exec_cmd('gsettings set org.gnome.desktop.interface color-scheme "prefer-dark"')
 	hl.exec_cmd('gsettings set org.gnome.desktop.interface gtk-theme "Adwaita-dark"')
 	hl.exec_cmd("kdeconnectd")
+	hl.exec_cmd("awww-daemon")
+	hl.exec_cmd("quickshell")
 	hl.exec_cmd("dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP")
 end)
 -------------------------------
@@ -106,8 +108,8 @@ hl.config({
         border_size = 2,
 
         col = {
-            active_border   = { colors = {"rgba(2299ff55)", "rgba(00889944)"}, angle = 45 },
-            inactive_border = "rgba(59595933)",
+            active_border   = { colors = {"rgba(A7CBEBff)", "rgba(A7B3EBff)"}, angle = 45 },
+            inactive_border = "rgba(62829F55)",
         },
 
         -- Set to true to enable resizing windows by clicking and dragging on borders and gaps
@@ -131,7 +133,7 @@ hl.config({
             enabled      = true,
             range        = 4,
             render_power = 3,
-            color        = 0xee1a1a1a,
+            color        = 0xee2B4C6F,
         },
 
         blur = {

@@ -1,0 +1,507 @@
+#!/bin/bash
+#
+# Pin and unpin apps on quickshelldock without editing UserConfig.qml.
+#
+# Pinned apps are appended to pins.json in the dock's state dir. The dock
+# watches that file and reloads it live, so a pin shows up immediately.
+# UserConfig.qml stays the declarative base; pins layer on top of it, and
+# the saved drag order applies to the merged list.
+
+set -euo pipefail
+
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/burninc0de.dock"
+LEGACY_DIRS=("${XDG_STATE_HOME:-$HOME/.local/state}/quickshelldock" "${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/dock" "${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/stealthdock")
+PINS_FILE="$STATE_DIR/pins.json"
+# Apps declared in UserConfig.qml can't be removed by editing pins.json, and
+# rewriting the user's hand-written QML is not this tool's business. They get
+# suppressed by name here instead, so "unpin" works on every dock icon.
+HIDDEN_FILE="$STATE_DIR/hidden.json"
+
+migrate_legacy_state() {
+  # Migrate from any legacy locations (quickshelldock, omarchy/dock,
+  # omarchy/stealthdock) to the final omarchy/burninc0de.dock.
+  mkdir -p "$STATE_DIR"
+  for legacy in "${LEGACY_DIRS[@]}"; do
+    [[ "$legacy" == "$STATE_DIR" ]] && continue
+    [[ -d "$legacy" ]] || continue
+    for f in pins.json hidden.json order.json; do
+      if [[ -f "$legacy/$f" && ! -e "$STATE_DIR/$f" ]]; then
+        cp -n -- "$legacy/$f" "$STATE_DIR/$f" 2>/dev/null || cp -- "$legacy/$f" "$STATE_DIR/$f" 2>/dev/null || true
+      fi
+    done
+  done
+}
+migrate_legacy_state
+
+die() {
+  echo "quickshelldock-pin: $*" >&2
+  exit 1
+}
+
+command -v jq >/dev/null || die "jq is required"
+
+notify() {
+  # Optional: this script is useful on any Hyprland box, not just Omarchy.
+  if command -v omarchy-notification-send >/dev/null; then
+    omarchy-notification-send -g "󰐃" "$1" "$2" || true
+  elif command -v notify-send >/dev/null; then
+    notify-send "$1" "$2" || true
+  else
+    echo "$1: $2"
+  fi
+}
+
+desktop_dirs() {
+  local dirs=("$HOME/.local/share/applications")
+  local IFS=:
+  for d in ${XDG_DATA_DIRS:-/usr/local/share:/usr/share}; do
+    dirs+=("$d/applications")
+  done
+  printf '%s\n' "${dirs[@]}"
+}
+
+# First match wins, so ~/.local/share overrides /usr/share the way XDG says.
+# "<id>.desktop" is tried before the bare "<id>", because ids ending in
+# .desktop are real (org.telegram.desktop) and must not be stripped.
+find_desktop() {
+  local id="$1" dir
+  while IFS= read -r dir; do
+    [[ -f "$dir/$id.desktop" ]] && { printf '%s\n' "$dir/$id.desktop"; return 0; }
+  done < <(desktop_dirs)
+  while IFS= read -r dir; do
+    [[ -f "$dir/$id" ]] && { printf '%s\n' "$dir/$id"; return 0; }
+  done < <(desktop_dirs)
+  return 1
+}
+
+# Reads a key from the [Desktop Entry] group only, ignoring action groups
+# further down the file (which repeat Name= and Exec= with other values).
+entry_key() {
+  local file="$1" key="$2"
+  awk -v key="$key" '
+    /^\[/ { in_entry = ($0 == "[Desktop Entry]"); next }
+    in_entry && index($0, key "=") == 1 {
+      sub(/^[^=]*=/, "")
+      print
+      exit
+    }
+  ' "$file"
+}
+
+# Exec= carries launcher field codes the dock must not pass to the binary.
+strip_field_codes() {
+  sed -E 's/%[fFuUdDnNickvm]//g; s/[[:space:]]+/ /g; s/^ //; s/ $//'
+}
+
+read_json_array() {
+  [[ -s "$1" ]] && jq -e 'type == "array"' "$1" >/dev/null 2>&1 && cat "$1" || echo '[]'
+}
+
+write_json_array() {
+  mkdir -p "$STATE_DIR"
+  local tmp
+  tmp=$(mktemp "$1.XXXXXX")
+  cat >"$tmp"
+  mv "$tmp" "$1"
+}
+
+read_pins() { read_json_array "$PINS_FILE"; }
+write_pins() { write_json_array "$PINS_FILE"; }
+read_hidden() { read_json_array "$HIDDEN_FILE"; }
+write_hidden() { write_json_array "$HIDDEN_FILE"; }
+
+hide() { read_hidden | jq --arg k "$1" 'if index([$k]) then . else . + [$k] end' | write_hidden; }
+unhide() { read_hidden | jq --arg k "$1" 'map(select(. != $k))' | write_hidden; }
+
+is_pinned() {
+  read_pins | jq -e --arg id "$1" 'any(.[]; .id == $id)' >/dev/null 2>&1
+}
+
+pin() {
+  local id="$1" window_class="${2-}" file name icon exec_line cmd app_id
+
+  file=$(find_desktop "$id") || die "no desktop entry named '$id'"
+
+  if is_pinned "$id"; then
+    echo "already pinned: $id"
+    return 0
+  fi
+
+  name=$(entry_key "$file" Name)
+  icon=$(entry_key "$file" Icon)
+  exec_line=$(entry_key "$file" Exec)
+  app_id=$(entry_key "$file" StartupWMClass)
+  # For omarchy webapps the desktop has no StartupWMClass but the window
+  # class is chrome-host__-Default. When pinning from a running window, use
+  # the window class as appId so the dock can match the window afterwards.
+  # Chrome PWAs have a stale crx_... StartupWMClass that doesn't match the
+  # Wayland appId (chrome-...-Default), so prefer the live class when given.
+  if [[ -n "$window_class" ]]; then
+    app_id="$window_class"
+  elif [[ -z "$app_id" ]]; then
+    # Pinned via --pick/desktop id: synthesize chrome-host id for webapps.
+    local _exec_line
+    _exec_line=$(entry_key "$file" Exec)
+    if [[ "$_exec_line" =~ https?://([^/[:space:]\":]+) ]]; then
+      app_id="chrome-${BASH_REMATCH[1],,}__-Default"
+    fi
+  fi
+
+  [[ -n $exec_line ]] || die "$id has no Exec= line"
+  cmd=$(printf '%s' "$exec_line" | strip_field_codes)
+  [[ -n $name ]] || name="$id"
+  [[ -n $icon ]] || icon="$id"
+  # Some packaged .desktop files ship an unsubstituted template placeholder
+  # here (Chromium's says "@@startup_wm_class"). Matching on that never hits,
+  # so drop it and let the dock fall back to matching the binary name, which
+  # is right more often than a guess derived from the desktop id anyway.
+  [[ $app_id == *@@* || $app_id == *%* ]] && app_id=""
+
+  read_pins | jq \
+    --arg id "$id" --arg name "$name" --arg icon "$icon" \
+    --arg cmd "$cmd" --arg appId "$app_id" \
+    '. + [{ id: $id, name: $name, icon: $icon, cmd: $cmd, appId: $appId }]' \
+    | write_pins
+
+  # A previously removed config app should come back rather than stay hidden.
+  unhide "$id"
+  unhide "$name"
+
+  notify "Pinned to dock" "$name"
+}
+
+unpin() {
+  local key="$1" name
+
+  name=$(read_pins | jq -r --arg k "$key" 'map(select(.id == $k or .name == $k)) | .[0].name // empty')
+  if [[ -n $name ]]; then
+    read_pins | jq --arg k "$key" 'map(select(.id != $k and .name != $k))' | write_pins
+    notify "Unpinned from dock" "$name"
+    return
+  fi
+
+  # Not one of ours: it comes from UserConfig.qml, so suppress it by name.
+  hide "$key"
+  notify "Removed from dock" "$key"
+}
+
+# A running window only knows its class/appId, not its desktop entry. Find
+# whichever entry claims that class: StartupWMClass beats an Exec basename
+# match, then omarchy webapp URL host, XDG order breaks remaining ties.
+find_desktop_for_window() {
+  local key="${1,,}" dir file wm exec_bin exec_line host
+  # Desktop id itself often equals Wayland appId (Chrome Apps: chrome-...-Default)
+  while IFS= read -r dir; do
+    [[ -d "$dir" ]] || continue
+    for file in "$dir"/*.desktop; do
+      [[ -e "$file" ]] || continue
+      local fid
+      fid=$(basename "$file" .desktop)
+      [[ "${fid,,}" == "$key" ]] && { basename "$file" .desktop; return 0; }
+    done
+  done < <(desktop_dirs)
+  while IFS= read -r dir; do
+    [[ -d "$dir" ]] || continue
+    for file in "$dir"/*.desktop; do
+      [[ -e "$file" ]] || continue
+      wm=$(entry_key "$file" StartupWMClass)
+      [[ $wm == *@@* || $wm == *%* ]] && wm=""
+      [[ ${wm,,} == "$key" ]] && { basename "$file" .desktop; return 0; }
+    done
+  done < <(desktop_dirs)
+  while IFS= read -r dir; do
+    [[ -d "$dir" ]] || continue
+    for file in "$dir"/*.desktop; do
+      [[ -e "$file" ]] || continue
+      exec_bin=$(entry_key "$file" Exec | awk '{print $1}' | sed 's:.*/::')
+      [[ ${exec_bin,,} == "$key" ]] && { basename "$file" .desktop; return 0; }
+    done
+  done < <(desktop_dirs)
+  # Omarchy webapps: Exec contains https://host, class is chrome-host__-Default
+  # e.g. Exec=omarchy-launch-webapp https://web.whatsapp.com/ vs class=chrome-web.whatsapp.com__-Default
+  # Prefer longest host so music.youtube.com beats youtube.com for
+  # chrome-music.youtube.com__-Default.
+  local best_file="" best_len=0
+  while IFS= read -r dir; do
+    [[ -d "$dir" ]] || continue
+    for file in "$dir"/*.desktop; do
+      [[ -e "$file" ]] || continue
+      exec_line=$(entry_key "$file" Exec)
+      if [[ "$exec_line" =~ https?://([^/[:space:]\":]+) ]]; then
+        host="${BASH_REMATCH[1],,}"
+        if [[ "$key" == *"$host"* && ${#host} -gt $best_len ]]; then
+          best_file="$file"
+          best_len=${#host}
+        fi
+      fi
+    done
+  done < <(desktop_dirs)
+  if [[ -n "$best_file" ]]; then
+    basename "$best_file" .desktop; return 0
+  fi
+  return 1
+}
+
+# Dock-menu path: pin straight from a running window. Native Wayland apps
+# often report an app-id equal to their desktop file id, so try that first,
+# then whichever entry claims the class via StartupWMClass/Exec/host. Otherwise
+# pin blind, which works whenever the binary is on PATH.
+pin_window() {
+  local key="$1" id
+
+  # The app-id often IS a desktop id (native Wayland apps), which pin()
+  # resolves itself. Otherwise claim-by-class, else blind.
+  # Pass window class even on direct id match so Chrome PWAs don't keep stale crx_... StartupWMClass.
+  if find_desktop "$key" >/dev/null 2>&1; then
+    pin "$key" "$key"
+  elif id=$(find_desktop_for_window "$key"); then
+    pin "$id" "$key"
+  else
+    is_pinned "$key" && { echo "already pinned: $key"; return 0; }
+    read_pins | jq \
+      --arg id "$key" --arg name "$key" --arg icon "$key" \
+      --arg cmd "$key" --arg appId "$key" \
+      '. + [{ id: $id, name: $name, icon: $icon, cmd: $cmd, appId: $appId }]' \
+      | write_pins
+    unhide "$key"
+    notify "Pinned to dock" "$key"
+  fi
+}
+
+restore() {
+  local key="$1"
+  read_hidden | jq -e --arg k "$key" 'index([$k])' >/dev/null 2>&1 || die "not hidden: $key"
+  unhide "$key"
+  notify "Restored to dock" "$key"
+}
+
+is_hidden() {
+  read_hidden | jq -e --arg k "$1" 'index([$k])' >/dev/null 2>&1
+}
+
+toggle() {
+  local key="$1" name
+  if is_pinned "$key"; then
+    unpin "$key"
+    return
+  fi
+  # A config app that was removed from the dock comes back instead of being
+  # pinned a second time. Its hidden key is the display name, not the id.
+  if is_hidden "$key"; then
+    restore "$key"
+    return
+  fi
+  name=$(entry_key "$(find_desktop "$key" 2>/dev/null)" Name 2>/dev/null || true)
+  if [[ -n $name ]] && is_hidden "$name"; then
+    restore "$name"
+    return
+  fi
+  pin "$key"
+}
+
+# "<glyph>\t<label>\t<subtext>" — omarchy's picker shows the glyph, renders the
+# subtext under the label, and hands back "<label>\t<subtext>". The desktop id
+# rides along as the subtext so same-named apps stay distinguishable.
+list_installed() {
+  local dir file id name nodisplay hidden type
+  declare -A seen=()
+  while IFS= read -r dir; do
+    [[ -d "$dir" ]] || continue
+    for file in "$dir"/*.desktop; do
+      [[ -e "$file" ]] || continue
+      id=$(basename "$file" .desktop)
+      [[ -n ${seen[$id]:-} ]] && continue
+      seen[$id]=1
+      type=$(entry_key "$file" Type)
+      [[ $type == "Application" ]] || continue
+      nodisplay=$(entry_key "$file" NoDisplay)
+      hidden=$(entry_key "$file" Hidden)
+      [[ $nodisplay == "true" || $hidden == "true" ]] && continue
+      name=$(entry_key "$file" Name)
+      [[ -n $name ]] || name="$id"
+      printf '\t%s\t%s\n' "$name" "$id"
+    done
+  done < <(desktop_dirs) | sort -f -t$'\t' -k2,2
+}
+
+require_picker() {
+  command -v omarchy-menu-select >/dev/null \
+    || die "--pick needs omarchy-menu-select (Omarchy). Pass a desktop id instead."
+}
+
+pick() {
+  require_picker
+  local selection id
+  selection=$(list_installed | omarchy-menu-select "Pin to dock") || exit 0
+  id=$(printf '%s' "$selection" | cut -d$'\t' -f2)
+  [[ -n $id ]] || exit 0
+  pin "$id"
+}
+
+unpick() {
+  require_picker
+  local options selection id
+  options=$(read_pins | jq -r '.[] | "\t" + .name + "\t" + .id')
+  [[ -n $options ]] || { notify "Nothing to unpin" "No apps pinned via the menu"; exit 0; }
+  selection=$(printf '%s\n' "$options" | omarchy-menu-select "Unpin from dock") || exit 0
+  id=$(printf '%s' "$selection" | cut -d$'\t' -f2)
+  [[ -n $id ]] || exit 0
+  unpin "$id"
+}
+
+# A removed config app is not on the dock any more, so it cannot be
+# right-clicked back. This is the way home.
+# Resolve a running window's class/appId to a human-readable Name via
+# the same lookup chain as pin_window: StartupWMClass, Exec basename,
+# URL host. Falls back to the raw class.
+resolve_name() {
+  local key="${1,,}" dir file wm exec_bin exec_line host
+  while IFS= read -r dir; do
+    [[ -d "$dir" ]] || continue
+    for file in "$dir"/*.desktop; do
+      [[ -e "$file" ]] || continue
+      local fid
+      fid=$(basename "$file" .desktop)
+      [[ "${fid,,}" == "$key" ]] && { entry_key "$file" Name; return 0; }
+    done
+  done < <(desktop_dirs)
+  while IFS= read -r dir; do
+    [[ -d "$dir" ]] || continue
+    for file in "$dir"/*.desktop; do
+      [[ -e "$file" ]] || continue
+      wm=$(entry_key "$file" StartupWMClass)
+      [[ $wm == *@@* || $wm == *%* ]] && wm=""
+      [[ ${wm,,} == "$key" ]] && { entry_key "$file" Name; return 0; }
+    done
+  done < <(desktop_dirs)
+  while IFS= read -r dir; do
+    [[ -d "$dir" ]] || continue
+    for file in "$dir"/*.desktop; do
+      [[ -e "$file" ]] || continue
+      exec_bin=$(entry_key "$file" Exec | awk '{print $1}' | sed 's:.*/::')
+      [[ ${exec_bin,,} == "$key" ]] && { entry_key "$file" Name; return 0; }
+    done
+  done < <(desktop_dirs)
+  local best_name="" best_len=0
+  while IFS= read -r dir; do
+    [[ -d "$dir" ]] || continue
+    for file in "$dir"/*.desktop; do
+      [[ -e "$file" ]] || continue
+      exec_line=$(entry_key "$file" Exec)
+      if [[ "$exec_line" =~ https?://([^/[:space:]\":]+) ]]; then
+        host="${BASH_REMATCH[1],,}"
+        if [[ "$key" == *"$host"* && ${#host} -gt $best_len ]]; then
+          best_name=$(entry_key "$file" Name)
+          best_len=${#host}
+        fi
+      fi
+    done
+  done < <(desktop_dirs)
+  if [[ -n "$best_name" ]]; then
+    echo "$best_name"; return 0
+  fi
+  echo "$1"
+  return 1
+}
+
+resolve_windows() {
+  # Batch-resolve classes (as arguments) to tab-separated name\tclass.
+  # One process, one scan of .desktop dirs.
+  local key name
+  for arg in "$@"; do
+    key="$arg"
+    name=$(resolve_name "$key" || true)
+    printf '%s\t%s\n' "$name" "$key"
+  done
+}
+
+dump_map() {
+  # Dump every class/appId → Name mapping the resolver knows about.
+  # Used by the dock to build a one-time cache so pin-menu labels are
+  # synchronous after the first open. First match wins (XDG order).
+  declare -A seen=()
+  local dir file name wm exec_bin exec_line host key
+  while IFS= read -r dir; do
+    [[ -d "$dir" ]] || continue
+    for file in "$dir"/*.desktop; do
+      [[ -e "$file" ]] || continue
+      name=$(entry_key "$file" Name)
+      [[ -n "$name" ]] || continue
+      wm=$(entry_key "$file" StartupWMClass)
+      [[ $wm == *@@* || $wm == *%* ]] && wm=""
+      if [[ -n "$wm" ]]; then
+        key="${wm,,}"
+        [[ -n ${seen[$key]:-} ]] || { seen[$key]=1; printf '%s\t%s\n' "$key" "$name"; }
+      fi
+      exec_bin=$(entry_key "$file" Exec | awk '{print $1}' | sed 's:.*/::')
+      if [[ -n "$exec_bin" ]]; then
+        key="${exec_bin,,}"
+        [[ -n ${seen[$key]:-} ]] || { seen[$key]=1; printf '%s\t%s\n' "$key" "$name"; }
+      fi
+      # desktop id itself is often the Wayland appId (chrome-...-Default for Chrome Apps)
+      key="$(basename "$file" .desktop | tr '[:upper:]' '[:lower:]')"
+      [[ -n ${seen[$key]:-} ]] || { seen[$key]=1; printf '%s\t%s\n' "$key" "$name"; }
+      exec_line=$(entry_key "$file" Exec)
+      if [[ "$exec_line" =~ https?://([^/[:space:]\":]+) ]]; then
+        host="${BASH_REMATCH[1],,}"
+        # chrome-host is "chrome-<host>__-Default", match on host substring
+        key="$host"
+        [[ -n ${seen[$key]:-} ]] || { seen[$key]=1; printf '%s\t%s\n' "$key" "$name"; }
+        # also the full chrome- synthetic class for exact match
+        key="chrome-${host}__-default"
+        [[ -n ${seen[$key]:-} ]] || { seen[$key]=1; printf '%s\t%s\n' "$key" "$name"; }
+      fi
+    done
+  done < <(desktop_dirs)
+}
+
+restore_pick() {
+  require_picker
+  local options selection name
+  options=$(read_hidden | jq -r '.[] | "\t" + .')
+  [[ -n $options ]] || { notify "Nothing to restore" "No apps have been removed"; exit 0; }
+  selection=$(printf '%s\n' "$options" | omarchy-menu-select "Restore to dock") || exit 0
+  name=$(printf '%s' "$selection" | cut -d$'\t' -f1)
+  [[ -n $name ]] || exit 0
+  restore "$name"
+}
+
+usage() {
+  cat <<'USAGE'
+Usage: quickshelldock-pin <desktop-id>          Pin an app
+       quickshelldock-pin --unpin <id|name>     Unpin an app
+       quickshelldock-pin --pin-window <class>  Pin a running window's app by class/appId
+       quickshelldock-pin --toggle <desktop-id> Pin if absent, unpin if present
+       quickshelldock-pin --pick                Choose an app to pin (Omarchy menu)
+       quickshelldock-pin --unpick              Choose an app to unpin (Omarchy menu)
+       quickshelldock-pin --restore <name>      Put a removed config app back
+       quickshelldock-pin --restore-pick        Choose an app to restore (Omarchy menu)
+       quickshelldock-pin --list                List pinned apps
+       quickshelldock-pin --list-hidden         List removed config apps
+       quickshelldock-pin --pinned <desktop-id> Exit 0 if pinned, 1 if not
+       quickshelldock-pin --resolve-windows     Resolve classes (as args), write name\tclass to stdout
+       quickshelldock-pin --dump-map            Dump all class→Name mappings (for dock cache)
+
+Pins are stored in $XDG_STATE_HOME/omarchy/burninc0de.dock/pins.json and merge on top
+of config/UserConfig.qml. Unpinning an app that came from UserConfig.qml
+records it in hidden.json instead of editing your QML; --restore undoes that.
+USAGE
+}
+
+case "${1-}" in
+  "" | -h | --help) usage ;;
+  --list) read_pins | jq -r '.[] | .name + "\t" + .id' ;;
+  --list-hidden) read_hidden | jq -r '.[]' ;;
+  --restore) [[ -n ${2-} ]] || die "--restore needs a name"; restore "$2" ;;
+  --pinned) [[ -n ${2-} ]] || die "--pinned needs a desktop id"; is_pinned "$2" ;;
+  --unpin) [[ -n ${2-} ]] || die "--unpin needs a desktop id"; unpin "$2" ;;
+  --pin-window) [[ -n ${2-} ]] || die "--pin-window needs a window class or appId"; pin_window "$2" ;;
+  --toggle) [[ -n ${2-} ]] || die "--toggle needs a desktop id"; toggle "$2" ;;
+  --pick) pick ;;
+  --unpick) unpick ;;
+  --restore-pick) restore_pick ;;
+  --resolve-windows) shift; resolve_windows "$@" ;;
+  --dump-map) dump_map ;;
+  -*) die "unknown option: $1" ;;
+  *) pin "$1" ;;
+esac

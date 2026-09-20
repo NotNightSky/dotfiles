@@ -1,14 +1,16 @@
-/* Standalone Wofi CSS - Matched to Hyprland & Hyprlock Theme */
+/* Standalone Wofi CSS - matched to color_palette_usage_guide.md
+ * Cream card (#F8FAF9) + denim text (#2B4C6F), slate borders (#62829F),
+ * periwinkle selection (#A7B3EB). Same roles as quickshell pills. */
 
-/* Color Palette derived from Hyprland & Hyprlock */
-@define-color background       rgba(0, 0, 0, 0.40);       /* Low-opacity dark base for glass/blur */
-@define-color border-active    rgba(34, 153, 255, 0.33);   /* #2299ff matching Hyprland active border */
-@define-color border-accent    rgba(0, 136, 153, 0.27);    /* #008899 matching Hyprland active border gradient */
-@define-color border-inactive  rgba(89, 89, 89, 0.20);     /* #595959 matching Hyprland inactive border */
-@define-color text-main        rgba(216, 222, 233, 0.95);  /* Nord Frost white/blue text from Hyprlock */
-@define-color text-dim         rgba(216, 222, 233, 0.70);  /* Hyprlock label text color */
-@define-color input-bg         rgba(0, 0, 0, 0.25);       /* Subtle input background */
-@define-color entry-select     rgba(0, 136, 153, 0.25);    /* Soft cyan/blue highlight on selection */
+/* Color Palette from color_palette_usage_guide.md */
+@define-color background       rgba(248, 250, 249, 0.92); /* #F8FAF9 cream card, glass for blur */
+@define-color border-active    rgba(98, 130, 159, 1.0);   /* #62829F slate - window border, focus ring */
+@define-color border-accent    rgba(167, 179, 235, 0.9);  /* #A7B3EB periwinkle - selected entry border */
+@define-color border-inactive  rgba(98, 130, 159, 0.35);  /* #62829F slate - idle input border */
+@define-color text-main        rgba(43, 76, 111, 0.95);   /* #2B4C6F denim - body text, 8.47:1 on cream */
+@define-color text-dim         rgba(98, 130, 159, 0.95);  /* #62829F slate - subtitles, unselected entries */
+@define-color input-bg         rgba(167, 203, 235, 0.28); /* #A7CBEB sky tint - subtle input background */
+@define-color entry-select     rgba(167, 179, 235, 0.45); /* #A7B3EB periwinkle - focus / active selection */
 
 * {
     all: unset;
@@ -61,7 +63,7 @@ window {
     border: 1px solid @border-inactive;
     outline: none;
     color: @text-main;
-    box-shadow: 1px 1px 8px rgba(0, 0, 0, 0.5);
+    box-shadow: 1px 1px 8px rgba(43, 76, 111, 0.25);
     border-radius: 10px;
     background-color: @input-bg;
     transition: all 0.2s ease-in-out;
@@ -116,7 +118,7 @@ window {
 }
 
 #entry:selected {
-    box-shadow: 1px 1px 8px rgba(0, 0, 0, 0.3);
+    box-shadow: 1px 1px 8px rgba(43, 76, 111, 0.20);
     border: 1px solid @border-accent;
     border-radius: 10px;
     background-color: @entry-select;
