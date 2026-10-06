@@ -22,10 +22,40 @@ Item {
     property int listMaxHeight: 320
     // Gap between the bar and the floating card (GNOME-style popdown).
     property int topOffset: 40
+    // Gap between the screen's right edge and the card.
+    property int sideOffset: 12
 
     readonly property int count: server.trackedNotifications.values.length
 
     signal closeRequested()
+
+    // Transient arrival toasts (top-right stack, one window each so the
+    // input mask hugs every card exactly). Skipped while the panel is
+    // open; critical notifications stick until clicked.
+    property var toasts: []
+    readonly property int maxToasts: 4
+    readonly property int toastHeight: 88
+    readonly property int toastGap: 8
+    property color cToastCritical: "#EBAA9D"
+
+    // Wrappers carry an explicit stack index: Variants exposes no index
+    // and indexOf lookups on this array misbehave in bindings, so the
+    // index is stamped at push/dismiss time instead.
+    function pushToast(notif) {
+        if (root.open)
+            return;
+        const arr = root.toasts.concat([{ n: notif, i: 0 }]).slice(-root.maxToasts);
+        for (let k = 0; k < arr.length; k++)
+            arr[k].i = k;
+        root.toasts = arr;
+    }
+
+    function dismissToast(notif) {
+        const arr = root.toasts.filter(w => w.n !== notif);
+        for (let k = 0; k < arr.length; k++)
+            arr[k].i = k;
+        root.toasts = arr;
+    }
 
     // Stays true briefly after closing so the exit animation can
     // play out before the window hides.
@@ -52,6 +82,7 @@ Item {
         persistenceSupported: true
         onNotification: notif => {
             notif.tracked = true;
+            root.pushToast(notif);
         }
     }
 
@@ -100,8 +131,9 @@ Item {
                 id: card
                 anchors {
                     top: parent.top
-                    horizontalCenter: parent.horizontalCenter
+                    right: parent.right
                     topMargin: root.topOffset
+                    rightMargin: root.sideOffset
                 }
                 width: root.cardWidth
                 height: layout.implicitHeight + 24
@@ -333,6 +365,148 @@ Item {
                         font.pixelSize: 12
                         renderType: Text.QtRendering
                         antialiasing: true
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- arrival toasts: one window per toast, stacked top-right ----
+    Variants {
+        model: Quickshell.screens
+
+        Item {
+            id: toastScope
+            required property var modelData
+
+            Variants {
+                model: root.toasts
+
+                PanelWindow {
+                    required property var modelData
+                    property int toastIndex: modelData.i
+                    screen: toastScope.modelData
+
+                    anchors {
+                        top: true
+                        right: true
+                    }
+                    margins {
+                        top: root.topOffset + toastIndex * (root.toastHeight + root.toastGap)
+                        right: root.sideOffset
+                    }
+
+                    implicitWidth: root.cardWidth
+                    implicitHeight: root.toastHeight
+
+                    color: "transparent"
+                    WlrLayershell.layer: WlrLayer.Overlay
+                    WlrLayershell.namespace: "qs-notif-toast"
+                    exclusionMode: ExclusionMode.Ignore
+
+                    mask: Region {
+                        Region { item: toastCard }
+                    }
+
+                    Rectangle {
+                        id: toastCard
+                        anchors.fill: parent
+                        radius: 12
+                        color: root.cBg
+                        border.color: root.cBorder
+                        border.width: 1
+
+                        // Fade in on arrival; removal is instant.
+                        opacity: 0
+                        Component.onCompleted: opacity = 1
+                        Behavior on opacity { enabled: root.animSpeed > 0; NumberAnimation { duration: 180 * root.animSpeed; easing.type: Easing.OutCubic } }
+
+                        // Critical edge: peach strip so sticky toasts read
+                        // as important at a glance.
+                        Rectangle {
+                            anchors {
+                                left: parent.left
+                                top: parent.top
+                                bottom: parent.bottom
+                                leftMargin: 8
+                                topMargin: 10
+                                bottomMargin: 10
+                            }
+                            width: 3
+                            radius: 1.5
+                            visible: modelData.n.urgency === NotificationUrgency.Critical
+                            color: root.cToastCritical
+                        }
+
+                        TapHandler {
+                            acceptedButtons: Qt.LeftButton
+                            onTapped: root.dismissToast(modelData.n)
+                        }
+
+                        Column {
+                            anchors {
+                                left: parent.left
+                                right: parent.right
+                                top: parent.top
+                                topMargin: 10
+                                rightMargin: 10
+                                // Clear the critical edge strip (x 8..11).
+                                leftMargin: modelData.n.urgency === NotificationUrgency.Critical ? 18 : 10
+                            }
+                            spacing: 2
+
+                            Text {
+                                width: parent.width
+                                text: modelData.n.appName || ""
+                                textFormat: Text.PlainText
+                                color: root.cText
+                                opacity: 0.7
+                                font.family: root.fontFamily
+                                font.pixelSize: 11
+                                elide: Text.ElideRight
+                                renderType: Text.QtRendering
+                                antialiasing: true
+                            }
+                            Text {
+                                width: parent.width
+                                text: modelData.n.summary || ""
+                                textFormat: Text.PlainText
+                                color: root.cText
+                                font.family: root.fontFamily
+                                font.pixelSize: 13
+                                font.weight: Font.Bold
+                                elide: Text.ElideRight
+                                maximumLineCount: 1
+                                renderType: Text.QtRendering
+                                antialiasing: true
+                            }
+                            Text {
+                                width: parent.width
+                                visible: (modelData.n.body || "") !== ""
+                                text: modelData.n.body || ""
+                                textFormat: Text.PlainText
+                                color: root.cText
+                                font.family: root.fontFamily
+                                font.pixelSize: 12
+                                wrapMode: Text.Wrap
+                                maximumLineCount: 2
+                                elide: Text.ElideRight
+                                renderType: Text.QtRendering
+                                antialiasing: true
+                            }
+                        }
+                    }
+
+                    // Auto-dismiss: sender timeout when sane, 5s fallback,
+                    // capped at 30s. Critical toasts stick until clicked.
+                    Timer {
+                        interval: {
+                            const t = Number(modelData.n.expireTimeout);
+                            return t > 0 ? Math.min(t, 30000) : 5000;
+                        }
+                        repeat: false
+                        running: modelData.n.urgency !== NotificationUrgency.Critical
+                        onTriggered: root.dismissToast(modelData.n)
                     }
                 }
             }
