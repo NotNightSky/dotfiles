@@ -22,8 +22,6 @@ Item {
     property int listMaxHeight: 320
     // Gap between the bar and the floating card (GNOME-style popdown).
     property int topOffset: 40
-    // Gap between the screen's right edge and the card.
-    property int sideOffset: 12
 
     readonly property int count: server.trackedNotifications.values.length
 
@@ -33,6 +31,8 @@ Item {
     // input mask hugs every card exactly). Skipped while the panel is
     // open; critical notifications stick until clicked.
     property var toasts: []
+    // Gap between the screen's right edge and the toast stack.
+    readonly property int toastSideOffset: 12
     readonly property int maxToasts: 4
     readonly property int toastHeight: 88
     readonly property int toastGap: 8
@@ -131,9 +131,8 @@ Item {
                 id: card
                 anchors {
                     top: parent.top
-                    right: parent.right
+                    horizontalCenter: parent.horizontalCenter
                     topMargin: root.topOffset
-                    rightMargin: root.sideOffset
                 }
                 width: root.cardWidth
                 height: layout.implicitHeight + 24
@@ -393,7 +392,7 @@ Item {
                     }
                     margins {
                         top: root.topOffset + toastIndex * (root.toastHeight + root.toastGap)
-                        right: root.sideOffset
+                        right: root.toastSideOffset
                     }
 
                     implicitWidth: root.cardWidth
