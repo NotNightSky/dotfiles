@@ -38,23 +38,78 @@ Item {
     readonly property int toastGap: 8
     property color cToastCritical: "#EBAA9D"
 
-    // Wrappers carry an explicit stack index: Variants exposes no index
-    // and indexOf lookups on this array misbehave in bindings, so the
-    // index is stamped at push/dismiss time instead.
+    // Wrappers carry an explicit stack index (Variants exposes no index)
+    // plus a plain-data snapshot of the notification. The snapshot matters:
+    // Notification objects die server-side (sender timeout/withdraw) while
+    // still listed here, and any later read on them throws -- leaving empty
+    // cards whose handlers also fail. Delegates only ever touch the
+    // snapshot, so a dead notification can never break rendering, timers,
+    // or clicks. Death still prunes the wrapper via the destroyed hook.
+    // Monotonic wrapper ids: modelData crossing the model boundary does
+    // not preserve object identity, so removal matches on this id (a plain
+    // number, immune to that) instead of wrapper references.
+    property int toastSeq: 0
+
     function pushToast(notif) {
         if (root.open)
             return;
-        const arr = root.toasts.concat([{ n: notif, i: 0 }]).slice(-root.maxToasts);
+        // Snapshot the live data first: a notification that is already
+        // dead on arrival is never listed. Reads here may throw for a
+        // dead object, hence the dedicated try block.
+        const w = { n: notif, id: ++root.toastSeq, app: "", summary: "", body: "", critical: false, timeout: 5000, i: 0 };
+        try {
+            w.app = notif.appName || "";
+            w.summary = notif.summary || "";
+            w.body = notif.body || "";
+            w.critical = notif.urgency === NotificationUrgency.Critical;
+            const t = Number(notif.expireTimeout);
+            w.timeout = t > 0 ? Math.min(t, 30000) : 5000;
+        } catch (e) {
+            return;
+        }
+        // Best-effort instant prune on server-side death. The hook form
+        // varies by Qt version, so failure here is fine: the sweep below
+        // and the per-toast timers cover it.
+        const wid = w.id;
+        try {
+            notif.destroyed.connect(() => root.dropToastById(wid));
+        } catch (e) {}
+        const arr = root.toasts.concat([w]).slice(-root.maxToasts);
         for (let k = 0; k < arr.length; k++)
             arr[k].i = k;
         root.toasts = arr;
     }
 
-    function dismissToast(notif) {
-        const arr = root.toasts.filter(w => w.n !== notif);
+    function dropToastById(id) {
+        const arr = root.toasts.filter(x => x.id !== id);
+        if (arr.length === root.toasts.length)
+            return;
         for (let k = 0; k < arr.length; k++)
             arr[k].i = k;
         root.toasts = arr;
+    }
+
+    // Backstop: drop wrappers whose notification died server-side (sender
+    // timeout/withdraw). The engine nulls dead refs, so a plain null check
+    // detects them with no property reads and no warnings. Pure JS, no
+    // processes -- cheap enough to run always.
+    function sweepToasts() {
+        if (root.toasts.length === 0)
+            return;
+        const arr = root.toasts.filter(w => w.n !== null && w.n !== undefined);
+        if (arr.length === root.toasts.length)
+            return;
+        for (let k = 0; k < arr.length; k++)
+            arr[k].i = k;
+        root.toasts = arr;
+    }
+
+    Timer {
+        id: toastSweepTimer
+        interval: 10000
+        repeat: true
+        running: true
+        onTriggered: root.sweepToasts()
     }
 
     // Stays true briefly after closing so the exit animation can
@@ -433,13 +488,13 @@ Item {
                             }
                             width: 3
                             radius: 1.5
-                            visible: modelData.n.urgency === NotificationUrgency.Critical
+                            visible: modelData.critical
                             color: root.cToastCritical
                         }
 
                         TapHandler {
                             acceptedButtons: Qt.LeftButton
-                            onTapped: root.dismissToast(modelData.n)
+                            onTapped: root.dropToastById(modelData.id)
                         }
 
                         Column {
@@ -450,13 +505,13 @@ Item {
                                 topMargin: 10
                                 rightMargin: 10
                                 // Clear the critical edge strip (x 8..11).
-                                leftMargin: modelData.n.urgency === NotificationUrgency.Critical ? 18 : 10
+                                leftMargin: modelData.critical ? 18 : 10
                             }
                             spacing: 2
 
                             Text {
                                 width: parent.width
-                                text: modelData.n.appName || ""
+                                text: modelData.app
                                 textFormat: Text.PlainText
                                 color: root.cText
                                 opacity: 0.7
@@ -468,7 +523,7 @@ Item {
                             }
                             Text {
                                 width: parent.width
-                                text: modelData.n.summary || ""
+                                text: modelData.summary
                                 textFormat: Text.PlainText
                                 color: root.cText
                                 font.family: root.fontFamily
@@ -481,8 +536,8 @@ Item {
                             }
                             Text {
                                 width: parent.width
-                                visible: (modelData.n.body || "") !== ""
-                                text: modelData.n.body || ""
+                                visible: modelData.body !== ""
+                                text: modelData.body
                                 textFormat: Text.PlainText
                                 color: root.cText
                                 font.family: root.fontFamily
@@ -499,13 +554,10 @@ Item {
                     // Auto-dismiss: sender timeout when sane, 5s fallback,
                     // capped at 30s. Critical toasts stick until clicked.
                     Timer {
-                        interval: {
-                            const t = Number(modelData.n.expireTimeout);
-                            return t > 0 ? Math.min(t, 30000) : 5000;
-                        }
+                        interval: modelData.timeout
                         repeat: false
-                        running: modelData.n.urgency !== NotificationUrgency.Critical
-                        onTriggered: root.dismissToast(modelData.n)
+                        running: !modelData.critical
+                        onTriggered: root.dropToastById(modelData.id)
                     }
                 }
             }
