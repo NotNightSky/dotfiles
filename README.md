@@ -1,3 +1,5 @@
+![Preview](./PREVIEW.png)
+
 # dotfiles
 
 My mostly vibe coded hyprland dots.
